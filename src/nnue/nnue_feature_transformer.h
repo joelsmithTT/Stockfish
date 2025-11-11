@@ -204,7 +204,7 @@ class FeatureTransformer {
             const IndexType offset = (HalfDimensions / 2) * p;
 
 #if defined(VECTOR)
-
+    #if !defined(USE_RVV)
             constexpr IndexType OutputChunkSize = MaxChunkSize;
             static_assert((HalfDimensions / 2) % OutputChunkSize == 0);
             constexpr IndexType NumOutputChunks = HalfDimensions / 2 / OutputChunkSize;
@@ -291,6 +291,54 @@ class FeatureTransformer {
 
                 out[j] = vec_packus_16(pa, pb);
             }
+    #else
+            // RVV implementation
+            // Scalar version: output[j] = (clamp(in0) * clamp(in1)) / 512
+            const int16_t* in0_ptr = &(accumulation[perspectives[p]][0]);
+            const int16_t* in1_ptr = &(accumulation[perspectives[p]][HalfDimensions / 2]);
+            uint8_t* out_ptr = output + offset;
+
+            IndexType n = HalfDimensions / 2;
+            IndexType out_idx = 0;
+
+            while (n > 0) {
+                size_t vl = __riscv_vsetvl_e16m1(n);
+
+                // Load inputs
+                vint16m1_t sum0 = __riscv_vle16_v_i16m1(in0_ptr, vl);
+                vint16m1_t sum1 = __riscv_vle16_v_i16m1(in1_ptr, vl);
+
+                // Clamp to [0, 254]
+                vint16m1_t zero = __riscv_vmv_v_x_i16m1(0, vl);
+                vint16m1_t max_val = __riscv_vmv_v_x_i16m1(254, vl);
+                sum0 = __riscv_vmax_vv_i16m1(sum0, zero, vl);
+                sum0 = __riscv_vmin_vv_i16m1(sum0, max_val, vl);
+                sum1 = __riscv_vmax_vv_i16m1(sum1, zero, vl);
+                sum1 = __riscv_vmin_vv_i16m1(sum1, max_val, vl);
+
+                // Widen to unsigned 32-bit for multiplication
+                vuint32m2_t sum0_wide = __riscv_vwcvtu_x_x_v_u32m2(__riscv_vreinterpret_v_i16m1_u16m1(sum0), vl);
+                vuint32m2_t sum1_wide = __riscv_vwcvtu_x_x_v_u32m2(__riscv_vreinterpret_v_i16m1_u16m1(sum1), vl);
+
+                // Multiply
+                vuint32m2_t product = __riscv_vmul_vv_u32m2(sum0_wide, sum1_wide, vl);
+
+                // Divide by 512 (shift right 9 bits)
+                vuint32m2_t result32 = __riscv_vsrl_vx_u32m2(product, 9, vl);
+
+                // Narrow to 16-bit, then to 8-bit
+                vuint16m1_t result16 = __riscv_vncvt_x_x_w_u16m1(result32, vl);
+                vuint8mf2_t result8 = __riscv_vncvt_x_x_w_u8mf2(result16, vl);
+
+                // Store
+                __riscv_vse8_v_u8mf2(out_ptr + out_idx, result8, vl);
+
+                in0_ptr += vl;
+                in1_ptr += vl;
+                out_idx += vl;
+                n -= vl;
+            }
+    #endif
 
 #else
 

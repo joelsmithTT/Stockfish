@@ -130,7 +130,7 @@ ifeq ($(ARCH), $(filter $(ARCH), \
                  x86-64-avx512icl x86-64-vnni512 x86-64-avx512 x86-64-avxvnni \
                  x86-64-bmi2 x86-64-avx2 x86-64-sse41-popcnt x86-64-modern x86-64-ssse3 x86-64-sse3-popcnt \
                  x86-64 x86-32-sse41-popcnt x86-32-sse2 x86-32 ppc-64 ppc-64-altivec ppc-64-vsx ppc-32 e2k \
-                 armv7 armv7-neon armv8 armv8-dotprod apple-silicon general-64 general-32 riscv64 \
+                 armv7 armv7-neon armv8 armv8-dotprod apple-silicon general-64 general-32 riscv64 riscv64-rvv\
                  loongarch64 loongarch64-lsx loongarch64-lasx))
    SUPPORTED_ARCH=true
 else
@@ -158,6 +158,7 @@ altivec = no
 vsx = no
 neon = no
 dotprod = no
+rvv = no
 arm_version = 0
 lsx = no
 lasx = no
@@ -394,6 +395,11 @@ endif
 
 ifeq ($(ARCH),riscv64)
 	arch = riscv64
+endif
+
+ifeq ($(ARCH),riscv64-rvv)
+	arch = riscv64
+	rvv = yes
 endif
 
 ifeq ($(findstring loongarch64,$(ARCH)),loongarch64)
@@ -804,6 +810,20 @@ endif
 ifeq ($(lsx),yes)
 	ifeq ($(comp),$(filter $(comp),gcc clang mingw icx))
 		CXXFLAGS += -mlsx
+	endif
+endif
+
+ifeq ($(rvv),yes)
+	CXXFLAGS += -DUSE_RVV
+	ifeq ($(comp),$(filter $(comp),gcc clang mingw icx))
+		CXXFLAGS += -march=rv64gcv
+	endif
+else
+	ifeq ($(arch), riscv64)
+		ifeq ($(comp),$(filter $(comp),gcc clang mingw icx))
+			# Explicitly disable RVV
+			CXXFLAGS += -march=rv64gc
+		endif
 	endif
 endif
 
