@@ -31,6 +31,10 @@
 #include "nnue_feature_transformer.h"  // IWYU pragma: keep
 #include "simd.h"
 
+#ifdef USE_RVV
+#include <riscv_vector.h>
+#endif
+
 namespace Stockfish::Eval::NNUE {
 
 using namespace SIMD;
@@ -418,7 +422,7 @@ void update_accumulator_refresh_cache(const FeatureTransformer<Dimensions>& feat
     auto& accumulator                 = accumulatorState.acc<Dimensions>();
     accumulator.computed[Perspective] = true;
 
-#ifdef VECTOR
+#if defined(VECTOR) && !defined(USE_RVV)
     vec_t      acc[Tiling::NumRegs];
     psqt_vec_t psqt[Tiling::NumPsqtRegs];
 
@@ -505,7 +509,87 @@ void update_accumulator_refresh_cache(const FeatureTransformer<Dimensions>& feat
         for (IndexType k = 0; k < Tiling::NumPsqtRegs; ++k)
             vec_store_psqt(&accTilePsqt[k], psqt[k]);
     }
+#elif defined(USE_RVV)
+    for (const auto index : removed)
+    {
+        const IndexType offset  = Dimensions * index;
+        const int16_t*  weights = &featureTransformer.weights[offset];
+        int16_t*        acc     = entry.accumulation;
+        IndexType       n       = Dimensions;
 
+        while (n > 0)
+        {
+            size_t     vl      = __riscv_vsetvl_e16m2(n);
+            vint16m2_t acc_vec = __riscv_vle16_v_i16m2(acc, vl);
+            vint16m2_t w_vec   = __riscv_vle16_v_i16m2(weights, vl);
+            acc_vec            = __riscv_vsub_vv_i16m2(acc_vec, w_vec, vl);
+            __riscv_vse16_v_i16m2(acc, acc_vec, vl);
+            acc += vl;
+            weights += vl;
+            n -= vl;
+        }
+
+        const int32_t* psqt_weights = &featureTransformer.psqtWeights[index * PSQTBuckets];
+        int32_t*       psqt_acc     = entry.psqtAccumulation;
+        IndexType      m            = PSQTBuckets;
+
+        while (m > 0)
+        {
+            size_t     vl       = __riscv_vsetvl_e32m2(m);
+            vint32m2_t psqt_vec = __riscv_vle32_v_i32m2(psqt_acc, vl);
+            vint32m2_t pw_vec   = __riscv_vle32_v_i32m2(psqt_weights, vl);
+            psqt_vec            = __riscv_vsub_vv_i32m2(psqt_vec, pw_vec, vl);
+            __riscv_vse32_v_i32m2(psqt_acc, psqt_vec, vl);
+            psqt_acc += vl;
+            psqt_weights += vl;
+            m -= vl;
+        }
+    }
+
+    for (const auto index : added)
+    {
+        const IndexType offset  = Dimensions * index;
+        const int16_t*  weights = &featureTransformer.weights[offset];
+        int16_t*        acc     = entry.accumulation;
+        IndexType       n       = Dimensions;
+
+        while (n > 0)
+        {
+            size_t     vl      = __riscv_vsetvl_e16m2(n);
+            vint16m2_t acc_vec = __riscv_vle16_v_i16m2(acc, vl);
+            vint16m2_t w_vec   = __riscv_vle16_v_i16m2(weights, vl);
+            acc_vec            = __riscv_vadd_vv_i16m2(acc_vec, w_vec, vl);
+            __riscv_vse16_v_i16m2(acc, acc_vec, vl);
+            acc += vl;
+            weights += vl;
+            n -= vl;
+        }
+
+        const int32_t* psqt_weights = &featureTransformer.psqtWeights[index * PSQTBuckets];
+        int32_t*       psqt_acc     = entry.psqtAccumulation;
+        IndexType      m            = PSQTBuckets;
+
+        while (m > 0)
+        {
+            size_t     vl       = __riscv_vsetvl_e32m2(m);
+            vint32m2_t psqt_vec = __riscv_vle32_v_i32m2(psqt_acc, vl);
+            vint32m2_t pw_vec   = __riscv_vle32_v_i32m2(psqt_weights, vl);
+            psqt_vec            = __riscv_vadd_vv_i32m2(psqt_vec, pw_vec, vl);
+            __riscv_vse32_v_i32m2(psqt_acc, psqt_vec, vl);
+            psqt_acc += vl;
+            psqt_weights += vl;
+            m -= vl;
+        }
+    }
+
+    // The accumulator of the refresh entry has been updated.
+    // Now copy its content to the actual accumulator we were refreshing.
+
+    std::memcpy(accumulator.accumulation[Perspective], entry.accumulation,
+                sizeof(BiasType) * Dimensions);
+
+    std::memcpy(accumulator.psqtAccumulation[Perspective], entry.psqtAccumulation,
+                sizeof(int32_t) * PSQTBuckets);
 #else
 
     for (const auto index : removed)
